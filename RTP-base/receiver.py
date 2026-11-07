@@ -1,28 +1,78 @@
 import argparse
 import socket
+import sys
 
-from utils import PacketHeader, compute_checksum
+from utils import (
+    TYPE_START,
+    TYPE_END,
+    TYPE_DATA,
+    TYPE_ACK,
+    build_packet,
+    unpack_packet,
+)
 
 
 def receiver(receiver_ip, receiver_port, window_size):
-    """TODO: Listen on socket and print received message to sys.stdout."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind((receiver_ip, receiver_port))
-    while True:
-        # Receive packet; address includes both IP and port
-        pkt, address = s.recvfrom(2048)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((receiver_ip, receiver_port))
 
-        # Extract header and payload
-        pkt_header = PacketHeader(pkt[:16])
-        msg = pkt[16 : 16 + pkt_header.length]
+    in_connection = False
+    sender_addr = None
+    expected_seq = 1
+    packet_buffer = {}
 
-        # Verity checksum
-        pkt_checksum = pkt_header.checksum
-        pkt_header.checksum = 0
-        computed_checksum = compute_checksum(pkt_header / msg)
-        if pkt_checksum != computed_checksum:
-            print("checksums not match")
-        print(msg)
+    try:
+        while True:
+            raw_data, addr = sock.recvfrom(2048)
+            hdr, payload = unpack_packet(raw_data)
+
+            if hdr is None:
+                continue
+
+            if not in_connection:
+                if hdr.type == TYPE_START:
+                    in_connection = True
+                    sender_addr = addr
+                    expected_seq = 1
+                    packet_buffer.clear()
+                    ack = build_packet(TYPE_ACK, 1)
+                    sock.sendto(ack, sender_addr)
+                continue
+
+            if hdr.type == TYPE_START:
+                continue
+
+            sender_addr = addr
+
+            if hdr.type == TYPE_DATA:
+                if hdr.seq_num >= expected_seq + window_size:
+                    continue
+
+                if hdr.seq_num < expected_seq:
+                    ack = build_packet(TYPE_ACK, expected_seq)
+                    sock.sendto(ack, sender_addr)
+                    continue
+
+                if hdr.seq_num not in packet_buffer:
+                    packet_buffer[hdr.seq_num] = payload
+
+                while expected_seq in packet_buffer:
+                    data_chunk = packet_buffer.pop(expected_seq)
+                    sys.stdout.buffer.write(data_chunk)
+                    expected_seq += 1
+                sys.stdout.buffer.flush()
+
+                ack = build_packet(TYPE_ACK, expected_seq)
+                sock.sendto(ack, sender_addr)
+
+            elif hdr.type == TYPE_END:
+                ack = build_packet(TYPE_ACK, hdr.seq_num)
+                sock.sendto(ack, sender_addr)
+                sys.stdout.buffer.flush()
+                break
+
+    finally:
+        sock.close()
 
 
 def main():
